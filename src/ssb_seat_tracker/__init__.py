@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from ssb-seat-tracker!")
+"""Read-only Temple University SSB seat tracker."""
+
+__version__ = "0.1.0"

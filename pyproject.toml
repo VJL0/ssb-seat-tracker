@@ -1,19 +1,36 @@
 [project]
 name = "ssb-seat-tracker"
 version = "0.1.0"
-description = "Add your description here"
+description = "Read-only Temple University SSB seat availability monitor"
 readme = "README.md"
 authors = [
     { name = "Victor", email = "jlvictor2020@gmail.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "boto3>=1.40.0",
     "httpx>=0.28.1",
     "pydantic>=2.13.4",
 ]
 
 [project.scripts]
-ssb-seat-tracker = "ssb_seat_tracker:main"
+ssb-seat-tracker = "ssb_seat_tracker.main:main"
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+asyncio_mode = "auto"
+markers = [
+    "integration: makes opt-in requests to Temple's public SSB service",
+]
+strict = true
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
