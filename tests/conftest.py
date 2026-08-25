@@ -60,7 +60,18 @@ def initialized_banner(respx_mock: respx.MockRouter) -> respx.Route:
 
 
 @pytest.fixture
-def selected_banner(respx_mock: respx.MockRouter, initialized_banner: respx.Route) -> respx.Route:
+def reset_banner(respx_mock: respx.MockRouter) -> respx.Route:
+    return respx_mock.post(f"{BASE_URL}/classSearch/resetDataForm").mock(
+        return_value=httpx.Response(200, json={"reset": True}, headers=JSON_HEADERS)
+    )
+
+
+@pytest.fixture
+def selected_banner(
+    respx_mock: respx.MockRouter,
+    initialized_banner: respx.Route,
+    reset_banner: respx.Route,
+) -> respx.Route:
     return respx_mock.post(f"{BASE_URL}/term/search").mock(
         return_value=httpx.Response(
             200,

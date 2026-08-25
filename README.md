@@ -148,10 +148,12 @@ DynamoDB table uses on-demand billing and is retained if the stack is deleted. S
 are disabled, so a failed watch remains eligible for the next one-minute scheduled invocation.
 
 One invocation loads all enabled watches, discovers public terms once, and performs one Banner
-course search for every unique `(term, subject, course_number)` group. State is written only after
-a successful check and, when needed, successful ntfy delivery. That ordering gives at-least-once
-alerts: a rare DynamoDB failure after ntfy accepts a message can produce a duplicate on retry, but
-a delivery failure cannot suppress the next alert.
+course search for every unique `(term, subject, course_number)` group. Before each group, the
+client resets Banner's session-scoped class-search form so criteria from the preceding course
+cannot leak into the next result set. State is written only after a successful check and, when
+needed, successful ntfy delivery. That ordering gives at-least-once alerts: a rare DynamoDB failure
+after ntfy accepts a message can produce a duplicate on retry, but a delivery failure cannot
+suppress the next alert.
 
 The ntfy topic is not in CloudFormation, GitHub, logs, or the repository. Create it as a standard
 SSM `SecureString` encrypted with the AWS-managed Parameter Store key:

@@ -237,6 +237,7 @@ class SSBClient:
 
         async def operation() -> list[Section]:
             assert self._unique_session_id is not None
+            await self._reset_class_search_form()
             sections: list[Section] = []
             expected_total: int | None = None
             offset = 0
@@ -299,6 +300,19 @@ class SSBClient:
             await self.initialize(force=True)
             await self.select_term(term)
             return await operation()
+
+    async def _reset_class_search_form(self) -> None:
+        """Clear Banner's session-scoped criteria before one logical course search."""
+
+        response = await self._send(
+            "POST",
+            "/classSearch/resetDataForm",
+            data={"resetCourses": "true", "resetSections": "true"},
+            headers=self._ajax_headers(),
+        )
+        payload = self._json(response)
+        if not isinstance(payload, dict) or payload.get("reset") is not True:
+            raise SSBResponseError("Temple did not reset the class-search form")
 
     async def get_section(
         self, *, term: str, subject: str, course_number: str, crn: str

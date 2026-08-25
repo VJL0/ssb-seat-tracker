@@ -39,6 +39,10 @@ def term_selected() -> httpx.Response:
     )
 
 
+def form_reset() -> httpx.Response:
+    return httpx.Response(200, json={"reset": True}, headers=JSON_HEADERS)
+
+
 def search_result(
     section_payload: dict[str, object], data: list[dict[str, object]] | None = None
 ) -> httpx.Response:
@@ -107,6 +111,7 @@ async def test_term_resolution_requires_one_exact_match(respx_mock: respx.MockRo
 async def test_section_search_selects_term_and_maps_json(
     respx_mock: respx.MockRouter,
     selected_banner: respx.Route,
+    reset_banner: respx.Route,
     section_payload_factory: Callable[..., dict[str, object]],
 ) -> None:
     search = respx_mock.get(f"{BASE_URL}/searchResults/searchResults").mock(
@@ -119,8 +124,40 @@ async def test_section_search_selects_term_and_maps_json(
     assert section.effective_seats == 1
     assert selected_banner.calls.last.request.url.params["mode"] == "search"
     assert b"term=202636" in selected_banner.calls.last.request.content
+    assert reset_banner.call_count == 1
+    assert reset_banner.calls.last.request.content == b"resetCourses=true&resetSections=true"
     assert search.calls.last.request.url.params["txt_subject"] == "CIS"
     assert search.calls.last.request.url.params["uniqueSessionId"]
+
+
+async def test_each_course_search_resets_session_scoped_form(
+    respx_mock: respx.MockRouter,
+    selected_banner: respx.Route,
+    reset_banner: respx.Route,
+    section_payload_factory: Callable[..., dict[str, object]],
+) -> None:
+    search = respx_mock.get(f"{BASE_URL}/searchResults/searchResults").mock(
+        side_effect=[
+            search_result(section_payload_factory()),
+            search_result(
+                section_payload_factory(
+                    courseReferenceNumber="20419",
+                    subject="MATH",
+                    courseNumber="1041",
+                    courseTitle="Calculus I",
+                )
+            ),
+        ]
+    )
+
+    async with SSBClient() as client:
+        cis = await client.search_sections(term="202636", subject="CIS", course_number="4526")
+        math = await client.search_sections(term="202636", subject="MATH", course_number="1041")
+
+    assert [cis[0].subject, math[0].subject] == ["CIS", "MATH"]
+    assert selected_banner.call_count == 1
+    assert reset_banner.call_count == 2
+    assert [call.request.url.params["txt_subject"] for call in search.calls] == ["CIS", "MATH"]
 
 
 @pytest.mark.usefixtures("selected_banner")
@@ -203,13 +240,16 @@ async def test_search_refreshes_session_once_after_auth_status(
     select = respx_mock.post(f"{BASE_URL}/term/search").mock(
         side_effect=[term_selected(), term_selected()]
     )
+    reset = respx_mock.post(f"{BASE_URL}/classSearch/resetDataForm").mock(
+        side_effect=[form_reset(), form_reset()]
+    )
     search = respx_mock.get(f"{BASE_URL}/searchResults/searchResults").mock(
         side_effect=[httpx.Response(status), search_result(section_payload_factory())]
     )
     async with SSBClient() as client:
         sections = await client.search_sections(term="202636", subject="CIS", course_number="4526")
     assert sections[0].course_reference_number == "31752"
-    assert init.call_count == select.call_count == search.call_count == 2
+    assert init.call_count == select.call_count == reset.call_count == search.call_count == 2
 
 
 @pytest.mark.usefixtures("selected_banner")
@@ -282,6 +322,9 @@ async def test_unexpected_html_refreshes_once_then_fails(
     select = respx_mock.post(f"{BASE_URL}/term/search").mock(
         side_effect=[term_selected(), term_selected()]
     )
+    reset = respx_mock.post(f"{BASE_URL}/classSearch/resetDataForm").mock(
+        side_effect=[form_reset(), form_reset()]
+    )
     search = respx_mock.get(f"{BASE_URL}/searchResults/searchResults").mock(
         side_effect=[
             httpx.Response(200, text="<html>expired</html>", headers=HTML_HEADERS),
@@ -291,4 +334,4 @@ async def test_unexpected_html_refreshes_once_then_fails(
     async with SSBClient() as client:
         with pytest.raises(SSBRequestError):
             await client.search_sections(term="202636", subject="CIS", course_number="4526")
-    assert init.call_count == select.call_count == search.call_count == 2
+    assert init.call_count == select.call_count == reset.call_count == search.call_count == 2
