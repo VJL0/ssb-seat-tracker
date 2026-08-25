@@ -1,0 +1,69 @@
+name: Deploy production
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          version: 0.12.5
+      - run: uv lock --check
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+      - name: Install AWS SAM CLI
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          use-installer: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: sam validate --lint
+      - run: sam build
+      - name: Request short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: ssb-seat-tracker-${{ github.run_id }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+          unset-current-credentials: true
+          action-timeout-s: 120
+      - name: Deploy through the restricted CloudFormation role
+        run: >-
+          sam deploy
+          --stack-name ssb-seat-tracker
+          --region "${{ vars.AWS_REGION }}"
+          --s3-bucket "${{ vars.AWS_ARTIFACT_BUCKET }}"
+          --role-arn "${{ vars.AWS_CFN_EXECUTION_ROLE_ARN }}"
+          --capabilities CAPABILITY_IAM
+          --parameter-overrides
+          NtfyTopicParameterName="${{ vars.NTFY_TOPIC_PARAMETER_NAME }}"
+          AlertEmail="${{ vars.ALERT_EMAIL }}"
+          ScheduleState=ENABLED
+          --no-confirm-changeset
+          --no-fail-on-empty-changeset
