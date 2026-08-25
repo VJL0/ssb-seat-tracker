@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: Read-only Temple SSB seat tracker with durable state and ntfy alerts
+
+Parameters:
+  NtfyTopicParameterName:
+    Type: String
+    Default: /ssb-seat-tracker/ntfy-topic
+    AllowedPattern: "^/[A-Za-z0-9_./-]+$"
+
+  AlertEmail:
+    Type: String
+    AllowedPattern: '^[^@ ]+@[^@ ]+\.[^@ ]+$'
+
+  ScheduleState:
+    Type: String
+    Default: ENABLED
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures:
+      - arm64
+    MemorySize: 256
+    Timeout: 30
+
+Resources:
+  WatchesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: term
+          AttributeType: S
+        - AttributeName: crn
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: term
+          KeyType: HASH
+        - AttributeName: crn
+          KeyType: RANGE
+
+      Tags:
+        - Key: Application
+          Value: ssb-seat-tracker
+        - Key: Environment
+          Value: production
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  TrackerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-tracker
+      RetentionInDays: 14
+
+  TrackerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: TrackerRuntime
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${TrackerLogGroup.Arn}:*
+
+              - Sid: AccessWatchState
+                Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt WatchesTable.Arn
+
+              - Sid: ReadNtfyTopic
+                Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${NtfyTopicParameterName}
+
+  TrackerScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}
+      Tags:
+        - Key: Application
+          Value: ssb-seat-tracker
+        - Key: Environment
+          Value: production
+
+  SchedulerInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+                aws:SourceArn: !GetAtt TrackerScheduleGroup.Arn
+
+      Policies:
+        - PolicyName: InvokeTracker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt TrackerFunction.Arn
+
+  TrackerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-tracker
+
+      Description: Polls Temple Banner SSB for configured course-seat watches
+
+      CodeUri: .
+      Handler: ssb_seat_tracker.main.lambda_handler
+
+      Role: !GetAtt TrackerExecutionRole.Arn
+
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 60
+        MaximumRetryAttempts: 0
+
+      LoggingConfig:
+        LogFormat: JSON
+        ApplicationLogLevel: INFO
+        SystemLogLevel: WARN
+        LogGroup: !Ref TrackerLogGroup
+
+      Environment:
+        Variables:
+          WATCHES_TABLE_NAME: !Ref WatchesTable
+          NTFY_TOPIC_PARAMETER_NAME: !Ref NtfyTopicParameterName
+          NTFY_BASE_URL: https://ntfy.sh
+
+      Events:
+        EveryMinute:
+          Type: ScheduleV2
+          Properties:
+            GroupName: !Ref TrackerScheduleGroup
+            Description: Poll configured Temple SSB course watches
+            ScheduleExpression: rate(1 minute)
+            State: !Ref ScheduleState
+
+            RoleArn: !GetAtt SchedulerInvokeRole.Arn
+
+            FlexibleTimeWindow:
+              Mode: "OFF"
+
+            RetryPolicy:
+              MaximumEventAgeInSeconds: 60
+              MaximumRetryAttempts: 0
+
+    Metadata:
+      BuildMethod: makefile
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: SSB seat tracker alerts
+
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  TrackerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Tracker failed three or more times within five minutes
+
+      Namespace: AWS/Lambda
+      MetricName: Errors
+
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref TrackerFunction
+
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+
+      TreatMissingData: notBreaching
+
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  FunctionName:
+    Description: Lambda function name
+    Value: !Ref TrackerFunction
+
+  WatchesTableName:
+    Description: DynamoDB watch-state table
+    Value: !Ref WatchesTable
