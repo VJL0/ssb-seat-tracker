@@ -1,14 +1,14 @@
 version = 0.1
 
-[default.deploy.parameters]
-stack_name = "ssb-seat-tracker"
-resolve_s3 = true
-s3_prefix = "ssb-seat-tracker"
-region = "us-east-1"
-confirm_changeset = true
-capabilities = "CAPABILITY_IAM"
-parameter_overrides = "NtfyTopicParameterName=\"/ssb-seat-tracker/ntfy-topic\" AlertEmail=\"jlvictor2020@gmail.com\" ScheduleState=\"ENABLED\""
-image_repositories = []
-
 [default.global.parameters]
+stack_name = "ssb-seat-tracker"
 region = "us-east-1"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+s3_prefix = "ssb-seat-tracker"
