@@ -108,16 +108,17 @@ uv run ruff format --check .
 uv run pytest
 ```
 
-An explicitly opt-in smoke test verifies public term discovery against Temple without sending a
-notification or querying a specific course:
+Seven focused tests cover the Temple client contract, watch-cycle transitions and failure safety,
+and ntfy delivery. Parameterized cases exercise equivalent failures and non-notification
+transitions without duplicating test logic. HTTP behavior is isolated with RESPX's strict pytest
+router, so the normal suite cannot accidentally reach Temple or ntfy.
+
+One opt-in live contract test checks Temple's current response schema without asserting volatile
+seat counts or CRNs:
 
 ```bash
-SSB_LIVE_TEST=1 uv run pytest -m integration
+SSB_LIVE_TEST=1 uv run pytest -m live
 ```
-
-The test configuration uses pytest's recommended importlib mode for new `src/` projects, strict
-configuration and registered markers. Shared setup uses fresh fixtures, and HTTP behavior is
-isolated with RESPX's pytest router so an unmatched request fails instead of reaching the network.
 
 The application is intentionally limited to four substantive modules:
 
@@ -148,12 +149,11 @@ DynamoDB table uses on-demand billing and is retained if the stack is deleted. S
 are disabled, so a failed watch remains eligible for the next one-minute scheduled invocation.
 
 One invocation loads all enabled watches, discovers public terms once, and performs one Banner
-course search for every unique `(term, subject, course_number)` group. Before each group, the
-client resets Banner's session-scoped class-search form so criteria from the preceding course
-cannot leak into the next result set. State is written only after a successful check and, when
-needed, successful ntfy delivery. That ordering gives at-least-once alerts: a rare DynamoDB failure
-after ntfy accepts a message can produce a duplicate on retry, but a delivery failure cannot
-suppress the next alert.
+course search for every unique `(term, subject, course_number)` group. The client initializes each
+term once per anonymous cookie session and then reuses that session for subsequent searches. State
+is written only after a successful check and, when needed, successful ntfy delivery. That ordering
+gives at-least-once alerts: a rare DynamoDB failure after ntfy accepts a message can produce a
+duplicate on retry, but a delivery failure cannot suppress the next alert.
 
 The ntfy topic is not in CloudFormation, GitHub, logs, or the repository. Create it as a standard
 SSM `SecureString` encrypted with the AWS-managed Parameter Store key:
