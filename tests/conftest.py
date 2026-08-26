@@ -10,11 +10,7 @@ from ssb_seat_tracker.models import Section
 type SectionPayloadFactory = Callable[..., dict[str, object]]
 type SectionFactory = Callable[..., Section]
 
-TERM_HTML = """<!doctype html><html><head>
-<meta name="synchronizerToken" content="token-123">
-</head><body>Select a Term for Class Search</body></html>"""
 JSON_HEADERS = {"content-type": "application/json;charset=UTF-8"}
-HTML_HEADERS = {"content-type": "text/html;charset=UTF-8"}
 
 
 @pytest.fixture
@@ -25,6 +21,7 @@ def section_payload_factory() -> SectionPayloadFactory:
         "courseNumber": "4526",
         "sequenceNumber": "001",
         "courseTitle": "Foundations of Machine Learning",
+        "campusDescription": "Main",
         "maximumEnrollment": 40,
         "enrollment": 39,
         "seatsAvailable": 1,
@@ -53,24 +50,8 @@ def section_factory(section_payload_factory: SectionPayloadFactory) -> SectionFa
 
 
 @pytest.fixture
-def initialized_banner(respx_mock: respx.MockRouter) -> respx.Route:
-    return respx_mock.get(f"{BASE_URL}/term/termSelection").mock(
-        return_value=httpx.Response(200, text=TERM_HTML, headers=HTML_HEADERS)
-    )
-
-
-@pytest.fixture
-def reset_banner(respx_mock: respx.MockRouter) -> respx.Route:
-    return respx_mock.post(f"{BASE_URL}/classSearch/resetDataForm").mock(
-        return_value=httpx.Response(200, json={"reset": True}, headers=JSON_HEADERS)
-    )
-
-
-@pytest.fixture
 def selected_banner(
     respx_mock: respx.MockRouter,
-    initialized_banner: respx.Route,
-    reset_banner: respx.Route,
 ) -> respx.Route:
     return respx_mock.post(f"{BASE_URL}/term/search").mock(
         return_value=httpx.Response(

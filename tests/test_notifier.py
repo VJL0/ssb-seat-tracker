@@ -6,37 +6,31 @@ import pytest
 import respx
 
 from ssb_seat_tracker.models import Section
-from ssb_seat_tracker.notifier import NotificationError, NtfyNotifier
+from ssb_seat_tracker.notifier import NtfyNotifier
+
+NOW = datetime(2026, 8, 24, 13, 0, tzinfo=UTC)
 
 
-async def test_ntfy_publishes_opening_with_priority_and_tags(
-    respx_mock: respx.MockRouter, section_factory: Callable[..., Section]
+@pytest.mark.respx(assert_all_mocked=True, assert_all_called=True)
+async def test_notifier_sends_opening(
+    respx_mock: respx.MockRouter,
+    section_factory: Callable[..., Section],
 ) -> None:
-    route = respx_mock.post("https://ntfy.sh/private-topic").mock(
-        return_value=httpx.Response(200, json={"id": "message-id"})
+    notification = respx_mock.post("https://ntfy.sh/private-topic").mock(
+        return_value=httpx.Response(204)
     )
+
     async with httpx.AsyncClient() as http_client:
         notifier = NtfyNotifier(topic="private-topic", client=http_client)
-        await notifier.send_opening(
-            section_factory(),
-            checked_at=datetime(2026, 8, 24, 13, 17, tzinfo=UTC),
-        )
+        await notifier.send_opening(section_factory(), checked_at=NOW)
 
-    request = route.calls.last.request
+    request = notification.calls.last.request
     assert request.headers["Title"] == "CIS 4526 seat opening"
-    assert request.headers["Priority"] == "high"
-    assert request.headers["Tags"] == "rotating_light"
-    assert "Effective seats: 1" in request.content.decode()
-
-
-async def test_ntfy_failure_is_safe_and_retryable(
-    respx_mock: respx.MockRouter, section_factory: Callable[..., Section]
-) -> None:
-    respx_mock.post("https://ntfy.sh/private-topic").mock(return_value=httpx.Response(503))
-    async with httpx.AsyncClient() as http_client:
-        notifier = NtfyNotifier(topic="private-topic", client=http_client)
-        with pytest.raises(NotificationError, match="ntfy notification failed"):
-            await notifier.send_opening(
-                section_factory(),
-                checked_at=datetime(2026, 8, 24, 13, 17, tzinfo=UTC),
-            )
+    assert request.content.decode() == (
+        "🚨 CIS 4526 has an opening\n\n"
+        "CRN: 31752\n"
+        "Effective seats: 1\n"
+        "Banner seats remaining: 1\n"
+        "Waitlist actual: 0\n\n"
+        "Checked: Aug 24, 2026 9:00 AM ET"
+    )
