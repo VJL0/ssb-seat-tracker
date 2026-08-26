@@ -9,13 +9,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from .errors import ConfigurationError, NotificationError
 from .models import Section
 
 EASTERN = ZoneInfo("America/New_York")
-
-
-class NotificationError(RuntimeError):
-    """A notification failed without exposing delivery secrets."""
+NTFY_TOPIC_PATTERN = re.compile(r"[-_A-Za-z0-9]{1,64}")
 
 
 class Notifier(Protocol):
@@ -53,8 +51,8 @@ class NtfyNotifier:
         server_url: str = "https://ntfy.sh",
         client: httpx.AsyncClient | None = None,
     ) -> None:
-        if not re.fullmatch(r"[-_A-Za-z0-9]{1,64}", topic):
-            raise ValueError(
+        if not NTFY_TOPIC_PATTERN.fullmatch(topic):
+            raise ConfigurationError(
                 "ntfy topic must contain only letters, numbers, dashes, or underscores"
             )
         self._topic = topic
@@ -68,7 +66,7 @@ class NtfyNotifier:
         try:
             response = await self._client.post(
                 f"{self._server_url}/{self._topic}",
-                content=opening_message(section, checked_at=checked_at).encode("utf-8"),
+                content=opening_message(section, checked_at=checked_at),
                 headers={
                     "Content-Type": "text/plain; charset=utf-8",
                     "Title": f"{section.subject} {section.course_number} seat opening",

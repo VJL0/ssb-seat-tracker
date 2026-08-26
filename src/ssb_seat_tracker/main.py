@@ -17,9 +17,17 @@ from typing import Any, Protocol
 
 import boto3
 
-from .client import RateLimitError, SSBClient, SSBError
+from .client import SSBClient
+from .errors import (
+    ConfigurationError,
+    NotificationError,
+    RateLimitError,
+    SeatTrackerError,
+    SSBError,
+    WatchCycleError,
+)
 from .models import Availability, Section, Term, Watch
-from .notifier import ConsoleNotifier, NotificationError, Notifier, NtfyNotifier
+from .notifier import ConsoleNotifier, Notifier, NtfyNotifier
 
 LOGGER = logging.getLogger("ssb_seat_tracker")
 LOGGER.setLevel(logging.INFO)
@@ -55,7 +63,7 @@ class WatchRepository(Protocol):
     def save_observation(self, watch: Watch, availability: Availability) -> None: ...
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CycleResult:
     watches: int = 0
     checked: int = 0
@@ -69,14 +77,6 @@ class CycleResult:
             "notified": self.notified,
             "failed": self.failed,
         }
-
-
-class WatchCycleError(RuntimeError):
-    """One or more watches failed and must be retried."""
-
-    def __init__(self, result: CycleResult) -> None:
-        super().__init__(f"{result.failed} of {result.watches} watches failed")
-        self.result = result
 
 
 class DynamoDBWatchRepository:
@@ -245,7 +245,7 @@ def _ssm_client() -> Any:
 def _required_environment(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
-        raise RuntimeError(f"required environment variable {name} is not configured")
+        raise ConfigurationError(f"required environment variable {name} is not configured")
     return value
 
 
@@ -272,7 +272,7 @@ async def run_lambda_cycle() -> CycleResult:
         await notifier.close()
 
 
-def lambda_handler(_event: dict[str, Any], _context: Any) -> dict[str, int]:
+def lambda_handler(_event: dict[str, object], _context: object) -> dict[str, int]:
     """AWS Lambda entry point for EventBridge Scheduler."""
 
     return asyncio.run(run_lambda_cycle()).as_dict()
@@ -364,7 +364,7 @@ def build_notifier() -> Notifier:
         except FileNotFoundError:
             topic = None
         except OSError as exc:
-            raise ValueError("could not read the local ntfy topic file") from exc
+            raise ConfigurationError("could not read the local ntfy topic file") from exc
     if topic:
         return NtfyNotifier(topic=topic)
     return ConsoleNotifier()
@@ -483,7 +483,7 @@ async def async_main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     try:
         return await run(args)
-    except (NotificationError, SSBError, ValueError) as exc:
+    except SeatTrackerError as exc:
         LOGGER.error("%s", exc)
         return 1
 

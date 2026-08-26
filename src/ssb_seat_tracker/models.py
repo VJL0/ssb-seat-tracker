@@ -1,5 +1,7 @@
 """Domain models and Temple-specific seat availability rules."""
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
@@ -22,6 +24,7 @@ class Section(BannerModel):
     course_number: str = Field(alias="courseNumber")
     sequence_number: str = Field(alias="sequenceNumber")
     course_title: str = Field(alias="courseTitle")
+    campus_description: str = Field(alias="campusDescription")
 
     maximum_enrollment: int = Field(alias="maximumEnrollment", ge=0)
     enrollment: int = Field(ge=0)
@@ -70,8 +73,8 @@ class Availability(BannerModel):
         return cls(
             crn=section.course_reference_number,
             available=section.is_available,
-            effectiveSeats=section.effective_seats,
-            checkedAt=checked_at,
+            effective_seats=section.effective_seats,
+            checked_at=checked_at,
         )
 
 
@@ -123,6 +126,6 @@ class Watch(BaseModel):
         return Availability(
             crn=self.crn,
             available=self.available,
-            effectiveSeats=self.effective_seats,
-            checkedAt=self.last_checked_at,
+            effective_seats=self.effective_seats,
+            checked_at=self.last_checked_at,
         )
