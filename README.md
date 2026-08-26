@@ -1,28 +1,24 @@
 # ssb-seat-tracker
 
-A small, read-only monitor for Temple University's public Ellucian Self-Service Banner
-(SSB) class search. It establishes an anonymous search session, resolves a term by its public
-description, queries one course, selects an exact CRN, applies Temple's waitlist rule, and alerts
-only when availability meaningfully changes.
+A small, read-only monitor for Temple University's public Ellucian Self-Service Banner (SSB)
+enrollment endpoint. It watches one or more CRNs in the fixed Banner term `202636` and alerts only
+when Temple's raw available-seat count transitions from zero or below to above zero.
 
 The tracker does **not** log into TUportal, handle AccessNet credentials or Duo, register, drop, or
 stage classes, or call authenticated student-record endpoints.
 
 ## Availability rule
 
-Temple warns that seats which appear open can be locked for students already on the waitlist. The
-public response does not expose which individual seats are locked, so the tracker uses this
-deliberately conservative estimate:
+The tracker uses Temple's provided count directly:
 
 ```text
-effective seats = max(Banner seats remaining - waitlist actual, 0)
+open = Enrollment Seats Available > 0
 ```
 
-This is an application heuristic, not a guarantee from Temple. The tracker considers a section
-available only when Banner also reports `openSection=true`; registration can still fail because of
-waitlist locks, prerequisites, holds, reserved seats, or other student-specific restrictions.
-Request, session, JSON, and validation failures are reported as unknown errors; they are never
-recorded as a closed class.
+It does not derive seats from capacity and enrollment, and negative values mean over-enrolled, not
+open. The response does not include Banner's `openSection` flag or course metadata. Registration
+can still fail because of prerequisites, holds, reserved seats, or other student-specific
+restrictions. Request and HTML-schema failures are never recorded as a closed class.
 
 ## Setup
 
@@ -48,20 +44,11 @@ local tracker only requires `NTFY_TOPIC`.
 
 ## Usage
 
-Discover Temple's current public term descriptions and codes:
-
-```bash
-uv run ssb-seat-tracker --list-terms
-```
-
-Perform one check during development:
+Check a list of CRNs once during development:
 
 ```bash
 uv run ssb-seat-tracker \
-  --term "2026 Fall" \
-  --subject CIS \
-  --course 4526 \
-  --crn 31752 \
+  --crn 53150 53151 53152 \
   --once
 ```
 
@@ -85,18 +72,17 @@ Git. Opening alerts are published through ntfy with high priority and a rotating
 
 ## What gets reported
 
-Each successful local CLI check logs the CRN, enrollment, capacity, raw remaining seats, waitlist
-count, conservative effective seats, Banner's open flag, and cross-list fields. Lambda emits
-structured records containing the CRN and transition outcome without the ntfy topic. An alert is
-sent when:
+Each successful check logs the CRN, Temple's available-seat count, and transition outcome. Opening
+alerts include enrollment, capacity, available seats, and waitlist count. An alert is sent only
+when:
 
-- the first successful observation is open;
-- a previously closed section becomes open; or
-- an already-open section gains effective seats.
+- the previous successful observation had `seats_available <= 0`; and
+- the current observation has `seats_available > 0`.
 
-Identical observations do not send repeated alerts. A failed check leaves the last successful
-state untouched. HTTP 429 responses honor `Retry-After` when it is expressed in seconds and never
-increase polling pressure.
+The first observation establishes state without alerting. Changes such as `1 → 2` do not repeat an
+alert. A failed check leaves the last successful state untouched. Transient transport failures and
+HTTP 408, 429, 500, 502, 503, and 504 responses receive at most two retries with short exponential
+backoff; permanent and malformed responses are not retried.
 
 ## Development
 
@@ -108,10 +94,10 @@ uv run ruff format --check .
 uv run pytest
 ```
 
-Seven focused tests cover the Temple client contract, watch-cycle transitions and failure safety,
-and ntfy delivery. Parameterized cases exercise equivalent failures and non-notification
-transitions without duplicating test logic. HTTP behavior is isolated with RESPX's strict pytest
-router, so the normal suite cannot accidentally reach Temple or ntfy.
+Focused tests cover the fixed-term HTML contract, CRN-list lookup, watch-cycle transitions and
+failure safety, and ntfy delivery. Parameterized cases exercise equivalent failures and
+non-notification transitions without duplicating test logic. HTTP behavior is isolated with
+RESPX's strict pytest router, so the normal suite cannot accidentally reach Temple or ntfy.
 
 One opt-in live contract test checks Temple's current response schema without asserting volatile
 seat counts or CRNs:
@@ -127,10 +113,9 @@ The application is intentionally limited to four substantive modules:
 - `notifier.py` — console and ntfy delivery; and
 - `main.py` — CLI, state transitions, and polling orchestration.
 
-The application-level `check_once` operation depends on small structural ports for section lookup
-and notification delivery. The concrete Banner and ntfy clients are adapters assembled by the CLI.
-This is a deliberately small application of ports-and-adapters architecture: it isolates business
-rules for testing without adding layers that a four-module service does not need.
+The watch cycle depends on small structural ports for enrollment lookup, persistence, and
+notification delivery. The concrete Banner, DynamoDB, local JSON, and ntfy adapters are assembled
+at the application boundary.
 
 ## AWS deployment
 
@@ -148,12 +133,11 @@ concurrency of one, no customer VPC, a 14-day log retention policy, and an error
 DynamoDB table uses on-demand billing and is retained if the stack is deleted. Scheduler retries
 are disabled, so a failed watch remains eligible for the next one-minute scheduled invocation.
 
-One invocation loads all enabled watches, discovers public terms once, and performs one Banner
-course search for every unique `(term, subject, course_number)` group. The client initializes each
-term once per anonymous cookie session and then reuses that session for subsequent searches. State
-is written only after a successful check and, when needed, successful ntfy delivery. That ordering
-gives at-least-once alerts: a rare DynamoDB failure after ntfy accepts a message can produce a
-duplicate on retry, but a delivery failure cannot suppress the next alert.
+One invocation loads all enabled CRNs and posts them to Temple's enrollment-info endpoint with the
+fixed term `202636`, using one shared HTTP connection pool and at most five concurrent requests.
+State is written only after a successful check and, when needed, successful ntfy delivery. That
+ordering gives at-least-once alerts: a rare DynamoDB failure after ntfy accepts a message can
+produce a duplicate on retry, but a delivery failure cannot suppress the next alert.
 
 The ntfy topic is not in CloudFormation, GitHub, logs, or the repository. Create it as a standard
 SSM `SecureString` encrypted with the AWS-managed Parameter Store key:
@@ -204,8 +188,8 @@ email after the first deployment.
 
 ### Add a watch
 
-After the application stack exists, get its table name from the stack output and add a record. The
-term is the exact public description returned by `--list-terms`:
+After the application stack exists, get its table name from the stack output and add one item per
+CRN:
 
 ```bash
 aws dynamodb put-item \
@@ -215,8 +199,8 @@ aws dynamodb put-item \
 ```
 
 Set `enabled` to false to pause one watch without deleting its last observation. A watch item may
-omit `available`, `effective_seats`, and `last_checked_at`; Lambda writes those fields after its
-first successful check.
+omit `seats_available` and `updated_at`; Lambda writes those fields after its first successful
+check.
 
 ### Production verification
 

@@ -1,4 +1,4 @@
-"""Notification delivery, independent of Banner session behavior."""
+"""Notification delivery for CRN seat openings."""
 
 from __future__ import annotations
 
@@ -10,34 +10,35 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .errors import ConfigurationError, NotificationError
-from .models import Section
+from .models import EnrollmentInfo
 
 EASTERN = ZoneInfo("America/New_York")
 NTFY_TOPIC_PATTERN = re.compile(r"[-_A-Za-z0-9]{1,64}")
 
 
 class Notifier(Protocol):
-    async def send_opening(self, section: Section, *, checked_at: datetime) -> None: ...
+    async def send_opening(
+        self, crn: str, info: EnrollmentInfo, *, checked_at: datetime
+    ) -> None: ...
 
     async def close(self) -> None: ...
 
 
-def opening_message(section: Section, *, checked_at: datetime) -> str:
+def opening_message(crn: str, info: EnrollmentInfo, *, checked_at: datetime) -> str:
     local_time = checked_at.astimezone(EASTERN)
     checked = f"{local_time:%b %d, %Y} {local_time:%I:%M %p}".replace(" 0", " ") + " ET"
     return (
-        f"🚨 {section.subject} {section.course_number} has an opening\n\n"
-        f"CRN: {section.course_reference_number}\n"
-        f"Effective seats: {section.effective_seats}\n"
-        f"Banner seats remaining: {section.seats_available}\n"
-        f"Waitlist actual: {section.wait_count}\n\n"
+        f"🚨 CRN {crn} has an opening\n\n"
+        f"Seats available: {info.seats_available}\n"
+        f"Enrollment: {info.enrollment}/{info.capacity}\n"
+        f"Waitlist actual: {info.waitlist_count}\n\n"
         f"Checked: {checked}"
     )
 
 
 class ConsoleNotifier:
-    async def send_opening(self, section: Section, *, checked_at: datetime) -> None:
-        print(opening_message(section, checked_at=checked_at), flush=True)
+    async def send_opening(self, crn: str, info: EnrollmentInfo, *, checked_at: datetime) -> None:
+        print(opening_message(crn, info, checked_at=checked_at), flush=True)
 
     async def close(self) -> None:
         return None
@@ -58,18 +59,16 @@ class NtfyNotifier:
         self._topic = topic
         self._server_url = server_url.rstrip("/")
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5, read=10, write=10, pool=5)
-        )
+        self._client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
 
-    async def send_opening(self, section: Section, *, checked_at: datetime) -> None:
+    async def send_opening(self, crn: str, info: EnrollmentInfo, *, checked_at: datetime) -> None:
         try:
             response = await self._client.post(
                 f"{self._server_url}/{self._topic}",
-                content=opening_message(section, checked_at=checked_at),
+                content=opening_message(crn, info, checked_at=checked_at),
                 headers={
                     "Content-Type": "text/plain; charset=utf-8",
-                    "Title": f"{section.subject} {section.course_number} seat opening",
+                    "Title": f"CRN {crn} seat opening",
                     "Priority": "high",
                     "Tags": "rotating_light",
                 },

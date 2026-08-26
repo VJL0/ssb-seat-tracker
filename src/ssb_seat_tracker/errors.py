@@ -10,7 +10,6 @@ if TYPE_CHECKING:
 __all__ = (
     "ConfigurationError",
     "NotificationError",
-    "RateLimitError",
     "SSBError",
     "SeatTrackerError",
     "WatchCycleError",
@@ -27,18 +26,6 @@ class ConfigurationError(SeatTrackerError):
 
 class SSBError(SeatTrackerError):
     """Temple SSB could not provide a trustworthy result."""
-
-
-class _SessionExpiredError(SSBError):
-    """The anonymous Banner session is stale."""
-
-
-class RateLimitError(SSBError):
-    """Temple requested that the client reduce request pressure."""
-
-    def __init__(self, retry_after: float | None = None) -> None:
-        super().__init__("Temple SSB rate limited the request")
-        self.retry_after = retry_after
 
 
 class NotificationError(SeatTrackerError):

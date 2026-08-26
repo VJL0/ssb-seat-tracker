@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, Mock
 
@@ -6,52 +5,30 @@ import pytest
 
 from ssb_seat_tracker.errors import WatchCycleError
 from ssb_seat_tracker.main import CycleResult, run_watch_cycle
-from ssb_seat_tracker.models import Section, Term, Watch
+from ssb_seat_tracker.models import TrackedSection
 
 NOW = datetime(2026, 8, 24, 13, 0, tzinfo=UTC)
 
 
-def watch_with_previous_seats(seats: int) -> Watch:
-    return Watch(
-        crn="31752",
-        term="2026 Fall",
-        subject="CIS",
-        course_number="4526",
-        available=seats > 0,
-        effective_seats=seats,
-        last_checked_at=NOW,
-    )
-
-
-def cycle_ports(
-    *,
-    previous_seats: int,
-    current_seats: int,
-    section_factory: Callable[..., Section],
-) -> tuple[Mock, Mock, Mock]:
+def cycle_ports(*, previous_seats: int | None, current_seats: int, enrollment_factory):
     client = Mock()
-    client.get_terms = AsyncMock(return_value=[Term(code="202636", description="2026 Fall")])
-    client.search_sections = AsyncMock(
-        return_value=[
-            section_factory(
-                seatsAvailable=current_seats,
-                enrollment=40 - current_seats,
-                openSection=current_seats > 0,
-            )
-        ]
+    client.get_enrollment = AsyncMock(
+        return_value=enrollment_factory(seats_available=current_seats)
     )
     notifier = Mock()
     notifier.send_opening = AsyncMock()
     repository = Mock()
-    repository.list_enabled.return_value = [watch_with_previous_seats(previous_seats)]
+    repository.list_enabled.return_value = [
+        TrackedSection(crn="53150", seats_available=previous_seats, updated_at=NOW)
+    ]
     return client, notifier, repository
 
 
-async def test_watch_cycle_notifies_on_closed_to_open(section_factory) -> None:
+async def test_watch_cycle_notifies_only_on_closed_to_open(enrollment_factory) -> None:
     client, notifier, repository = cycle_ports(
         previous_seats=0,
         current_seats=1,
-        section_factory=section_factory,
+        enrollment_factory=enrollment_factory,
     )
 
     result = await run_watch_cycle(
@@ -62,27 +39,26 @@ async def test_watch_cycle_notifies_on_closed_to_open(section_factory) -> None:
     )
 
     assert result == CycleResult(watches=1, checked=1, notified=1, failed=0)
-    notifier.send_opening.assert_awaited_once()
-    saved_watch, saved_availability = repository.save_observation.call_args.args
-    assert saved_watch.crn == "31752"
-    assert saved_availability.available is True
-    assert saved_availability.effective_seats == 1
+    notifier.send_opening.assert_awaited_once_with("53150", enrollment_factory(), checked_at=NOW)
+    repository.save_observation.assert_called_once_with(
+        repository.list_enabled.return_value[0], seats_available=1, updated_at=NOW
+    )
 
 
 @pytest.mark.parametrize(
     ("previous_seats", "current_seats"),
-    [(0, 0), (1, 1), (1, 0)],
-    ids=["closed-to-closed", "open-to-open", "open-to-closed"],
+    [(None, 1), (0, 0), (1, 1), (1, 2), (1, 0), (-2, -1)],
+    ids=["first-open", "full", "unchanged-open", "more-seats", "closed", "still-overfull"],
 )
-async def test_watch_cycle_does_not_notify_without_opening(
-    previous_seats: int,
+async def test_watch_cycle_does_not_notify_without_transition(
+    previous_seats: int | None,
     current_seats: int,
-    section_factory,
+    enrollment_factory,
 ) -> None:
     client, notifier, repository = cycle_ports(
         previous_seats=previous_seats,
         current_seats=current_seats,
-        section_factory=section_factory,
+        enrollment_factory=enrollment_factory,
     )
 
     result = await run_watch_cycle(
@@ -98,12 +74,12 @@ async def test_watch_cycle_does_not_notify_without_opening(
 
 
 async def test_watch_cycle_does_not_commit_state_when_notification_fails(
-    section_factory,
+    enrollment_factory,
 ) -> None:
     client, notifier, repository = cycle_ports(
         previous_seats=0,
         current_seats=1,
-        section_factory=section_factory,
+        enrollment_factory=enrollment_factory,
     )
     notifier.send_opening.side_effect = RuntimeError("delivery failed")
 

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from ssb_seat_tracker.client import SSBClient
+from ssb_seat_tracker.client import TERM, SsbClient
 
 pytestmark = [
     pytest.mark.live,
@@ -13,12 +13,10 @@ pytestmark = [
 ]
 
 
-async def test_live_ssb_course_search() -> None:
-    async with SSBClient() as client:
-        sections = await client.search_sections(term="202636", subject="CIS", course_number="4526")
+async def test_live_ssb_enrollment_lookup() -> None:
+    async with SsbClient() as client:
+        info = await client.get_enrollment(term=TERM, crn="53150")
 
-    assert sections
-    for section in sections:
-        assert section.subject == "CIS"
-        assert section.course_number == "4526"
-        assert section.course_reference_number
+    assert isinstance(info.enrollment, int)
+    assert isinstance(info.capacity, int)
+    assert isinstance(info.seats_available, int)

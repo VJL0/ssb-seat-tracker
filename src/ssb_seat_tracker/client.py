@@ -1,210 +1,114 @@
-"""Asynchronous client for Temple's public Ellucian SSB class search."""
+"""Direct client for Temple's fixed enrollment-info fragment."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
-from typing import Any
+import asyncio
+import re
 
 import httpx
-from pydantic import TypeAdapter, ValidationError
 
-from .errors import RateLimitError, SSBError, _SessionExpiredError
-from .models import Section, Term
+from .errors import SSBError
+from .models import EnrollmentInfo
 
 BASE_URL = "https://prd-xereg.temple.edu/StudentRegistrationSsb/ssb"
-SEARCH_PAGE_SIZE = 50
-MAX_SEARCH_PAGES = 20
-MAIN_CAMPUS_DESCRIPTION = "Main"
-TERM_LIST_ADAPTER = TypeAdapter(list[Term])
-SECTION_LIST_ADAPTER = TypeAdapter(list[Section])
+TERM = "202636"
+ENROLLMENT_PATH = "/searchResults/getEnrollmentInfo"
+MAX_CONCURRENCY = 5
+MAX_ATTEMPTS = 3
+
+_RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+_EXPECTED_LABELS = {
+    "Enrollment Actual",
+    "Enrollment Maximum",
+    "Enrollment Seats Available",
+    "Waitlist Capacity",
+    "Waitlist Actual",
+    "Waitlist Seats Available",
+}
+_ENROLLMENT_PATTERN = re.compile(
+    r'<span class="status-bold">\s*'
+    r"(Enrollment Actual|Enrollment Maximum|Enrollment Seats Available|"
+    r"Waitlist Capacity|Waitlist Actual|Waitlist Seats Available):\s*"
+    r"</span>\s*"
+    r"<span[^>]*>\s*(-?\d+)\s*</span>"
+)
 
 
-def _retry_after(response: httpx.Response) -> float | None:
-    value = response.headers.get("Retry-After")
-    if value is None:
-        return None
-    try:
-        return max(float(value), 0.0)
-    except ValueError:
-        try:
-            retry_at = parsedate_to_datetime(value)
-            if retry_at.tzinfo is None:
-                retry_at = retry_at.replace(tzinfo=UTC)
-            return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
-        except TypeError, ValueError, OverflowError:
-            return None
+def parse_enrollment(html: str) -> EnrollmentInfo:
+    values = {label: int(value) for label, value in _ENROLLMENT_PATTERN.findall(html)}
+    if values.keys() != _EXPECTED_LABELS:
+        missing = sorted(_EXPECTED_LABELS - values.keys())
+        raise SSBError(f"unexpected Temple enrollment response; missing {missing}")
+    return EnrollmentInfo(
+        enrollment=values["Enrollment Actual"],
+        capacity=values["Enrollment Maximum"],
+        seats_available=values["Enrollment Seats Available"],
+        waitlist_capacity=values["Waitlist Capacity"],
+        waitlist_count=values["Waitlist Actual"],
+        waitlist_available=values["Waitlist Seats Available"],
+    )
 
 
-class SSBClient:
-    """Persistent anonymous session for Temple's public class-search system."""
-
-    def __init__(
-        self,
-        *,
-        base_url: str = BASE_URL,
-        client: httpx.AsyncClient | None = None,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
+class SsbClient:
+    def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10, read=10, write=10, pool=10),
-            follow_redirects=True,
+            base_url=BASE_URL,
+            timeout=httpx.Timeout(10.0),
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=10),
             headers={"User-Agent": "ssb-seat-tracker/0.1 (read-only; responsible polling)"},
         )
-        self._selected_term: str | None = None
 
-    async def __aenter__(self) -> SSBClient:
+    async def __aenter__(self) -> SsbClient:
         return self
 
     async def __aexit__(self, *_args: object) -> None:
-        await self.close()
+        await self.aclose()
 
-    async def close(self) -> None:
+    async def get_enrollment(self, *, term: str, crn: str) -> EnrollmentInfo:
+        if not crn.isdigit():
+            raise SSBError("CRN must contain only digits")
+        response = await self._request_with_retry(term=term, crn=crn)
+        return parse_enrollment(response.text)
+
+    async def _request_with_retry(self, *, term: str, crn: str) -> httpx.Response:
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                response = await self._client.post(
+                    ENROLLMENT_PATH,
+                    data={"term": term, "courseReferenceNumber": crn},
+                )
+                if response.status_code in _RETRYABLE_STATUS and attempt < MAX_ATTEMPTS - 1:
+                    await asyncio.sleep(0.5 * (2**attempt))
+                    continue
+                response.raise_for_status()
+                return response
+            except httpx.TransportError as exc:
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise SSBError("Temple enrollment request failed") from exc
+                await asyncio.sleep(0.5 * (2**attempt))
+            except httpx.HTTPStatusError as exc:
+                raise SSBError(f"Temple SSB returned HTTP {exc.response.status_code}") from exc
+        raise AssertionError("unreachable")
+
+    async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
-    async def get_terms(self) -> list[Term]:
-        payload = await self._request_json(
-            "GET",
-            "/classSearch/getTerms",
-            params={"searchTerm": "", "offset": 1, "max": 100},
-        )
-        try:
-            return TERM_LIST_ADAPTER.validate_python(payload)
-        except ValidationError as exc:
-            raise SSBError("Temple term response failed validation") from exc
 
-    async def resolve_term(self, description: str) -> Term:
-        wanted = description.strip()
-        matches = [term for term in await self.get_terms() if term.description == wanted]
-        if len(matches) != 1:
-            raise SSBError(f"expected exactly one term named {wanted!r}; found {len(matches)}")
-        return matches[0]
+async def fetch_all(
+    client: SsbClient,
+    *,
+    term: str,
+    crns: list[str],
+) -> dict[str, EnrollmentInfo | BaseException]:
+    """Fetch every CRN with at most five Temple requests in flight."""
 
-    async def _select_term(self, term: str) -> None:
-        payload = await self._request_json(
-            "POST",
-            "/term/search",
-            data={"term": term},
-        )
-        if not isinstance(payload, dict) or not payload.get("fwdURL"):
-            raise SSBError("Temple did not establish the class-search term")
-        self._selected_term = term
+    semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
 
-    async def search_sections(
-        self, *, term: str, subject: str, course_number: str
-    ) -> list[Section]:
-        term = term.strip()
-        subject = subject.strip().upper()
-        course_number = course_number.strip()
-        try:
-            return await self._search_sections(term, subject, course_number)
-        except _SessionExpiredError:
-            self._client.cookies.clear()
-            self._selected_term = None
-            return await self._search_sections(term, subject, course_number)
+    async def fetch(crn: str) -> EnrollmentInfo:
+        async with semaphore:
+            return await client.get_enrollment(term=term, crn=crn)
 
-    async def _search_sections(self, term: str, subject: str, course_number: str) -> list[Section]:
-        if self._selected_term != term:
-            await self._select_term(term)
-
-        sections: list[Section] = []
-        total: int | None = None
-
-        for _page in range(MAX_SEARCH_PAGES):
-            params: dict[str, str | int] = {
-                "txt_term": term,
-                "txt_subject": subject,
-                "txt_courseNumber": course_number,
-                "pageMaxSize": SEARCH_PAGE_SIZE,
-            }
-            if sections:
-                params["pageOffset"] = len(sections)
-
-            payload = await self._request_json(
-                "GET",
-                "/searchResults/searchResults",
-                params=params,
-            )
-            if not isinstance(payload, dict):
-                raise SSBError("Temple section response lacked a JSON data list")
-            if payload.get("success") is not True:
-                raise SSBError("Temple reported an unsuccessful section search")
-
-            reported_total = payload.get("totalCount")
-            if isinstance(reported_total, bool) or not isinstance(reported_total, int):
-                raise SSBError("Temple section response had an invalid total count")
-            if total is not None and reported_total != total:
-                raise SSBError("Temple section count changed during pagination")
-            total = reported_total
-
-            raw_data = payload.get("data")
-            if raw_data is None and total == 0:
-                raw_data = []
-            try:
-                page = SECTION_LIST_ADAPTER.validate_python(raw_data)
-            except ValidationError as exc:
-                raise SSBError("Temple section response failed validation") from exc
-            if any(
-                section.subject != subject or section.course_number != course_number
-                for section in page
-            ):
-                raise SSBError("Temple section response contained results for a different course")
-            sections.extend(page)
-
-            if len(sections) == total:
-                return [
-                    section
-                    for section in sections
-                    if section.campus_description == MAIN_CAMPUS_DESCRIPTION
-                ]
-            if not page:
-                raise SSBError("Temple section pagination stopped before completion")
-            if len(sections) > total:
-                raise SSBError("Temple returned an inconsistent section count")
-
-        raise SSBError("Temple section response exceeded the pagination safety limit")
-
-    async def get_section(
-        self, *, term: str, subject: str, course_number: str, crn: str
-    ) -> Section:
-        sections = await self.search_sections(
-            term=term, subject=subject, course_number=course_number
-        )
-        matches = [section for section in sections if section.course_reference_number == crn]
-        if len(matches) != 1:
-            raise SSBError(f"CRN {crn} was not found uniquely in {subject.upper()} {course_number}")
-        return matches[0]
-
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        try:
-            response = await self._client.request(method, f"{self.base_url}{path}", **kwargs)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            raise SSBError("Temple SSB request failed") from exc
-
-        if response.status_code in {401, 403}:
-            raise _SessionExpiredError("Temple SSB anonymous session expired")
-        if response.status_code == 429:
-            raise RateLimitError(_retry_after(response))
-        if response.status_code >= 400:
-            raise SSBError(f"Temple SSB returned HTTP {response.status_code}")
-
-        return response
-
-    async def _request_json(self, method: str, path: str, **kwargs: Any) -> Any:
-        response = await self._request(method, path, **kwargs)
-        content_type = response.headers.get("content-type", "").lower()
-        if "html" in content_type:
-            raise _SessionExpiredError("Temple returned HTML instead of anonymous search data")
-        if "json" not in content_type:
-            raise SSBError("Temple response was not JSON")
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise SSBError("Temple returned malformed JSON") from exc
+    results = await asyncio.gather(*(fetch(crn) for crn in crns), return_exceptions=True)
+    return dict(zip(crns, results, strict=True))
