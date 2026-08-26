@@ -1,7 +1,4 @@
 {
-  "crn": {"S": "31752"},
-  "term": {"S": "2026 Fall"},
-  "subject": {"S": "CIS"},
-  "course_number": {"S": "4526"},
+  "crn": {"S": "53150"},
   "enabled": {"BOOL": true}
 }

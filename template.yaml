@@ -37,16 +37,12 @@ Resources:
       BillingMode: PAY_PER_REQUEST
 
       AttributeDefinitions:
-        - AttributeName: term
-          AttributeType: S
         - AttributeName: crn
           AttributeType: S
 
       KeySchema:
-        - AttributeName: term
-          KeyType: HASH
         - AttributeName: crn
-          KeyType: RANGE
+          KeyType: HASH
 
       Tags:
         - Key: Application
@@ -138,7 +134,7 @@ Resources:
     Properties:
       FunctionName: !Sub ${AWS::StackName}-tracker
 
-      Description: Polls Temple Banner SSB for configured course-seat watches
+      Description: Polls fixed-term Temple Banner enrollment for configured CRNs
 
       CodeUri: .
       Handler: ssb_seat_tracker.main.lambda_handler
@@ -166,7 +162,7 @@ Resources:
           Type: ScheduleV2
           Properties:
             GroupName: !Ref TrackerScheduleGroup
-            Description: Poll configured Temple SSB course watches
+            Description: Poll configured Temple SSB CRNs
             ScheduleExpression: rate(1 minute)
             State: !Ref ScheduleState
 
