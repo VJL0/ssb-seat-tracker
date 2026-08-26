@@ -186,21 +186,27 @@ then builds the ARM64 package with the locked dependency graph and deploys throu
 All third-party GitHub actions are pinned to immutable commit IDs. Confirm the SNS subscription
 email after the first deployment.
 
-### Add a watch
+### Manage production watches
 
-After the application stack exists, get its table name from the stack output and add one item per
-CRN:
+After the application stack exists, manage its CRNs with the project CLI:
 
 ```bash
-aws dynamodb put-item \
-  --table-name TABLE_NAME_FROM_STACK_OUTPUT \
-  --item file://infrastructure/watch-item.example.json \
-  --condition-expression 'attribute_not_exists(crn)'
+uv run ssb-seat-tracker watch add 53150
+uv run ssb-seat-tracker watch list
+uv run ssb-seat-tracker watch disable 53150
+uv run ssb-seat-tracker watch enable 53150
+uv run ssb-seat-tracker watch remove 53150
 ```
 
-Set `enabled` to false to pause one watch without deleting its last observation. A watch item may
-omit `seats_available` and `updated_at`; Lambda writes those fields after its first successful
-check.
+The CLI uses your current AWS credentials and region. It reads the table name from
+`WATCHES_TABLE_NAME` when that environment variable is set; otherwise it discovers the
+`WatchesTableName` output from the `ssb-seat-tracker` CloudFormation stack. For another deployment,
+use `watch --stack-name STACK ...` or `watch --table-name TABLE ...`.
+
+Adding a CRN uses a conditional write, so it will never overwrite an existing watch. Disabling a
+watch preserves its last observation; enabling it resumes checks, and removing it deletes the
+record. A new watch starts enabled, with Lambda adding `seats_available` and `updated_at` after its
+first successful check.
 
 ### Production verification
 
